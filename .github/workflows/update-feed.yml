@@ -1,0 +1,49 @@
+name: Update supplier feed
+on:
+  schedule:
+    - cron: "30 5 * * *"   # 05:30 UTC = 07:30 Budapest (CEST); 06:30 in winter time
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  actions: write
+concurrency:
+  group: feed
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build feed (aborts without touching the published feed on any sanity failure)
+        run: python3 scripts/update_feed.py
+      - name: Validate output
+        run: |
+          python3 - <<'PY'
+          import json, csv
+          j = json.load(open("feed/feed.json", encoding="utf-8"))
+          p = j["products"]
+          assert j["meta"]["currency"] == "EUR"
+          assert len(p) >= 1500, len(p)
+          skus = [r["sku"] for r in p]
+          assert len(skus) == len(set(skus)), "duplicate SKU in output"
+          rows = list(csv.DictReader(open("feed/feed.csv", encoding="utf-8")))
+          assert len(rows) == len(p), "csv/json mismatch"
+          print("OK", len(p), "SKUs")
+          PY
+      - name: Commit and push feed
+        run: |
+          git config user.name "feed-bot"
+          git config user.email "feed-bot@users.noreply.github.com"
+          git add feed data
+          if git diff --cached --quiet; then echo "no changes"; else git commit -m "feed $(date -u +%F)" && git push; fi
+      - name: Open issue on content changes (GitHub e-mails the repo owner)
+        if: hashFiles('issue.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue create --title "$(cat issue_title.txt)" --body-file issue.md
+      - name: Keep scheduled workflow alive (public repos get disabled after 60 idle days)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update-feed.yml/enable" || true
